@@ -3,16 +3,38 @@ import os
 import json
 import time
 import streamlit as st
-from google import genai
+import google.generativeai as genai
 
 # Force UTF-8 environment settings for Windows
-os.environ["PYTHONUTF8"] = "1"
 os.environ["PYTHONIOENCODING"] = "utf-8"
+os.environ["PYTHONLEGACYWINDOWSSTDIO"] = "utf-8"
 
-st.set_page_config(page_title="AI Cohort Technical Interviewer")
-st.title("AI Cohort Technical Interviewer")
+# Page Configuration
+st.set_page_config(
+    page_title="AI Cohort Technical Interviewer",
+    page_icon="💻",
+    layout="wide"
+)
 
-# Strict ASCII sanitizer
+# Custom Styling
+st.markdown("""
+    <style>
+    .stApp {
+        background-color: #0e1117;
+        color: #ffffff;
+    }
+    .stChatMessage {
+        border-radius: 10px;
+        padding: 12px;
+        margin-bottom: 10px;
+    }
+    div[data-testid="stSidebar"] {
+        background-color: #161b22;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Strict ASCII Sanitizers
 def sanitize(text):
     if isinstance(text, str):
         return text.encode("ascii", "ignore").decode("ascii")
@@ -27,132 +49,100 @@ def sanitize_obj(obj):
         return {sanitize(k): sanitize_obj(v) for k, v in obj.items()}
     return obj
 
-# Load curriculum and candidate JSON files safely
+# Load Curriculum & Candidate JSON Files Safely
+@st.cache_data
 def load_data():
-    curr_data = {}
-    cand_data = []
-    
-    if os.path.exists("curriculum.json"):
+    try:
+        with open("curriculum.json", "r", encoding="utf-8") as f:
+            curriculum = sanitize_obj(json.load(f))
+        with open("candidates.json", "r", encoding="utf-8") as f:
+            candidates = sanitize_obj(json.load(f))
+        return curriculum, candidates
+    except Exception as e:
+        st.error(f"Error loading JSON data files: {e}")
+        return {}, {}
+
+curriculum_data, candidates_data = load_data()
+
+# Safe API Response Generator with Retry Logic for Rate Limits
+def generate_response(prompt, api_key, model_name="gemini-1.5-flash", max_retries=4):
+    if not api_key:
+        return "Please enter a valid Gemini API Key in the sidebar."
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name)
+
+    # Retry loop to handle 429 Rate Limit errors smoothly
+    for attempt in range(max_retries):
         try:
-            with open("curriculum.json", "r", encoding="utf-8") as f:
-                curr_data = json.load(f)
-        except Exception:
-            curr_data = {}
-
-    if os.path.exists("candidates.json"):
-        try:
-            with open("candidates.json", "r", encoding="utf-8") as f:
-                raw = json.load(f)
-                if isinstance(raw, dict):
-                    cand_data = raw.get("candidates") or raw.get("profiles") or list(raw.values())
-                elif isinstance(raw, list):
-                    cand_data = raw
-        except Exception:
-            cand_data = []
-
-    if not cand_data or not isinstance(cand_data, list):
-        cand_data = [{"name": "Default Candidate", "completed_missions": []}]
-
-    return sanitize_obj(curr_data), sanitize_obj(cand_data)
-
-curriculum, candidates = load_data()
-
-# Safe API caller with built-in retry and model fallback
-def generate_response(client, prompt_text):
-    models = ["gemini-2.0-flash", "gemini-1.5-flash"]
-    for model_name in models:
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt_text
-                )
-                return response.text
-            except Exception as e:
-                err_msg = str(e)
-                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                    time.sleep(4)  # Pause briefly for free tier quota window to reset
-                else:
-                    break
-    raise Exception("Free tier rate limit hit. Please wait 15 seconds and try again.")
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg or "ResourceExhausted" in err_msg:
+                sleep_time = (2 ** attempt) + 3  # Exponential delay: 5s, 7s, 11s, 19s
+                time.sleep(sleep_time)
+            else:
+                return f"API Error: {err_msg}"
+                
+    return "Rate limit reached. Please wait 15–20 seconds before submitting another prompt."
 
 # Sidebar Configuration
-st.sidebar.header("Configuration")
-api_key = st.sidebar.text_input("Enter Gemini API Key", type="password")
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    
+    api_key = st.text_input("Enter Gemini API Key", type="password")
+    
+    if st.button("Reset Interview Session", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
 
-if st.sidebar.button("Reset Interview Session"):
-    st.session_state.clear()
-    st.rerun()
+    st.markdown("---")
+    
+    # Candidate Selection
+    cand_names = list(candidates_data.keys()) if isinstance(candidates_data, dict) else []
+    selected_cand = st.selectbox("Select Candidate", cand_names if cand_names else ["Default Candidate"])
+    
+    # Role Selection
+    curr_roles = list(curriculum_data.keys()) if isinstance(curriculum_data, dict) else []
+    selected_role = st.selectbox("Select Role / Topic", curr_roles if curr_roles else ["General Software Engineer"])
 
-cand_names = [c.get("name", f"Candidate {i+1}") for i, c in enumerate(candidates)]
-selected_idx = st.sidebar.selectbox("Select Candidate", range(len(cand_names)), format_func=lambda x: cand_names[x])
-selected_cand = candidates[selected_idx]
+# Main Chat Interface
+st.title("💻 AI Cohort Technical Interviewer")
+st.caption(f"Active Candidate: **{selected_cand}** | Role: **{selected_role}**")
 
-# Session State Initialization
+# Initialize Chat History
 if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "question_count" not in st.session_state:
-    st.session_state.question_count = 0
+    st.session_state.messages = [
+        {"role": "assistant", "content": f"Hello {selected_cand}! Ready to begin your technical interview for the {selected_role} position?"}
+    ]
 
-# Display Chat History
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+# Display Existing Chat History
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
 
-# Main Logic
-if api_key:
-    client = genai.Client(api_key=sanitize(api_key))
+# Handle User Input
+if user_input := st.chat_input("Type your response here..."):
+    # Render User Message
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.write(user_input)
 
-    # Initial Question
-    if len(st.session_state.messages) == 0:
-        prompt = f"""You are an expert AI Technical Interviewer for an AI Cohort.
-Candidate Profile: {json.dumps(selected_cand, ensure_ascii=True)}
-Curriculum Context: {json.dumps(curriculum, ensure_ascii=True)}
+    # Build Prompt Context
+    system_context = (
+        f"You are an expert technical interviewer evaluating candidate '{selected_cand}' "
+        f"for the role of '{selected_role}'. Ask relevant technical follow-up questions, "
+        f"assess code quality, and provide constructive feedback. Keep responses clear and structured."
+    )
+    
+    # Combine system context with recent messages
+    full_prompt = f"{system_context}\n\nCandidate Answer: {user_input}"
 
-Instructions:
-1. Introduce yourself briefly and ask Question 1 based on candidate completed topics.
-2. Do not use any emojis in your response.
-"""
-        try:
-            reply = generate_response(client, sanitize(prompt))
-            st.session_state.messages.append({"role": "assistant", "content": sanitize(reply)})
-            st.session_state.question_count = 1
-            st.rerun()
-        except Exception as e:
-            st.warning(f"Rate Limit Pause: {e}")
-
-    # Subsequent Questions (Up to 8)
-    if st.session_state.question_count < 8:
-        user_input = st.chat_input("Type your answer here...")
-        if user_input:
-            clean_input = sanitize(user_input)
-            st.session_state.messages.append({"role": "user", "content": clean_input})
-
-            prompt = f"""You are an AI Technical Interviewer.
-Current Question: {st.session_state.question_count}/8.
-Curriculum Context: {json.dumps(curriculum, ensure_ascii=True)}
-Candidate Profile: {json.dumps(selected_cand, ensure_ascii=True)}
-
-Instructions:
-1. Evaluate previous response briefly.
-2. Ask Question {st.session_state.question_count + 1}. Do not use emojis.
-Transcript: {json.dumps(sanitize_obj(st.session_state.messages), ensure_ascii=True)}
-"""
-            try:
-                reply = generate_response(client, sanitize(prompt))
-                st.session_state.messages.append({"role": "assistant", "content": sanitize(reply)})
-                st.session_state.question_count += 1
-                st.rerun()
-            except Exception as e:
-                st.warning(f"Rate Limit Pause: {e}")
-    else:
-        st.success("Technical Interview Completed!")
-        if st.button("Generate Structured Feedback Report"):
-            prompt = f"Analyze interview transcript and output structured feedback (Strengths, Weaknesses, Concepts Covered, Score /10):\n\n{json.dumps(sanitize_obj(st.session_state.messages), ensure_ascii=True)}"
-            try:
-                feedback = generate_response(client, sanitize(prompt))
-                st.markdown(sanitize(feedback))
-            except Exception as e:
-                st.warning(f"Rate Limit Pause: {e}")
-else:
-    st.info("Enter your Gemini API Key in the sidebar to start the AI Interview.")
+    # Generate AI Response
+    with st.chat_message("assistant"):
+        with st.spinner("Evaluating response..."):
+            ai_reply = generate_response(full_prompt, api_key)
+            st.write(ai_reply)
+            
+    st.session_state.messages.append({"role": "assistant", "content": ai_reply})
