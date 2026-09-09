@@ -65,7 +65,7 @@ def load_data():
 curriculum_data, candidates_data = load_data()
 
 # Safe API Response Generator with Retry Logic for Rate Limits
-def generate_response(prompt, api_key, model_name="gemini-1.5-flash", max_retries=4):
+def generate_response(prompt, api_key, model_name="gemini-3.6-flash", max_retries=4):
     if not api_key:
         return "Please enter a valid Gemini API Key in the sidebar."
 
